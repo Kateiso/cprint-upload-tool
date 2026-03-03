@@ -12,11 +12,13 @@ cprint-tool - 联创云打印上传工具
 用法:
   cprint-tool set-cookie --cookie 'OSESSIONID=...; SESSIONID=...'
   cprint-tool upload --file /path/to/file.pdf [选项]
+  cprint-tool check-session [--base-url URL]
   cprint-tool show-config
 
 子命令:
   set-cookie   保存登录 Cookie（手动从浏览器复制）
   upload       使用已保存 Cookie 上传文件
+  check-session  检查当前 Cookie 会话是否有效
   show-config  展示当前配置（不打印完整 Cookie）
 
 upload 选项:
@@ -82,6 +84,46 @@ cmd_show_config() {
   else
     echo "cookie_saved=no"
   fi
+}
+
+cmd_check_session() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base-url) base_url="${2:-}"; shift 2 ;;
+      *)
+        echo "未知参数: $1" >&2
+        usage
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ ! -f "$cookie_file" ]]; then
+    echo "未找到 Cookie，请先执行 set-cookie" >&2
+    exit 2
+  fi
+
+  local cookie
+  cookie=$(cat "$cookie_file")
+  local endpoint="${base_url%/}/api/client/PrintJob/Get?timestamp=$(date +%s)"
+  local body
+  body=$(curl -sS -m 20 -H "Cookie: $cookie" "$endpoint")
+
+  local code
+  local message
+  code=$(printf '%s' "$body" | sed -E 's/.*"code"[[:space:]]*:[[:space:]]*(-?[0-9]+).*/\1/' || true)
+  message=$(printf '%s' "$body" | sed -E 's/.*"message"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true)
+
+  if [[ "$code" == "0" ]]; then
+    echo "会话有效: code=0"
+    exit 0
+  fi
+
+  echo "会话无效: code=${code:-unknown}, message=${message:-unknown}"
+  if [[ "$code" == "4" ]]; then
+    echo "提示: 登录态失效，请重新执行 set-cookie"
+  fi
+  exit 1
 }
 
 cmd_upload() {
@@ -195,6 +237,7 @@ main() {
   case "$cmd" in
     set-cookie) cmd_set_cookie "$@" ;;
     upload) cmd_upload "$@" ;;
+    check-session) cmd_check_session "$@" ;;
     show-config) cmd_show_config "$@" ;;
     -h|--help|help) usage ;;
     *)

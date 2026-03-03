@@ -31,7 +31,13 @@ cd cprint-upload-tool
 ./bin/cprint-tool upload --file /绝对路径/文件.pdf
 ```
 
-4. 让 Agent 直接执行（示例）
+4. 检查会话是否有效
+
+```bash
+./bin/cprint-tool check-session
+```
+
+5. 让 Agent 直接执行（示例）
 - `打印一下这个文件：/path/to/file.pdf`
 - `用 cprint-tool 上传 /path/to/file.pdf，A4 黑白 单面 1份`
 
@@ -66,6 +72,7 @@ cd cprint-upload-tool
 
 1. `code=4` / “无效会话，未登录”
 - Cookie 失效，重新登录并执行 `set-cookie`
+- 可先执行 `./bin/cprint-tool check-session` 快速验证
 
 2. HTTP 连接超时
 - 当前网络无法访问校内地址 `10.135.0.139:9130`
