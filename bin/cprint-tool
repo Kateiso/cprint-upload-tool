@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL_DEFAULT="http://10.135.0.139:9130"
+STATE_DIR_DEFAULT="${HOME}/.config/cprint-tool"
+COOKIE_FILE_DEFAULT="${STATE_DIR_DEFAULT}/cookie.txt"
+
+usage() {
+  cat <<'EOF'
+cprint-tool - 联创云打印上传工具
+
+用法:
+  cprint-tool set-cookie --cookie 'OSESSIONID=...; SESSIONID=...'
+  cprint-tool upload --file /path/to/file.pdf [选项]
+  cprint-tool show-config
+
+子命令:
+  set-cookie   保存登录 Cookie（手动从浏览器复制）
+  upload       使用已保存 Cookie 上传文件
+  show-config  展示当前配置（不打印完整 Cookie）
+
+upload 选项:
+  --file PATH            要上传的文件（必填）
+  --base-url URL         服务地址，默认: http://10.135.0.139:9130
+  --color N              1=黑白, 2=彩色，默认 1
+  --paper N              -1=不指定, 9=A4, 8=A3，默认 -1
+  --duplex N             1=单面, 2=双面短边, 3=双面长边，默认 1
+  --from N               起始页，0=全部，默认 0
+  --to N                 结束页，默认 0
+  --copies N             份数，默认 1
+  --back-url URL         回跳地址，默认 <base-url>/client/new/cprintPc/printDoc.html?t=<timestamp>
+
+环境变量:
+  CPRINT_BASE_URL        覆盖默认 base-url
+  CPRINT_COOKIE_FILE     覆盖 Cookie 文件路径
+EOF
+}
+
+state_dir="${STATE_DIR_DEFAULT}"
+base_url="${CPRINT_BASE_URL:-$BASE_URL_DEFAULT}"
+cookie_file="${CPRINT_COOKIE_FILE:-$COOKIE_FILE_DEFAULT}"
+
+ensure_state_dir() {
+  mkdir -p "$(dirname "$cookie_file")"
+}
+
+cmd_set_cookie() {
+  local cookie=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cookie)
+        cookie="${2:-}"
+        shift 2
+        ;;
+      *)
+        echo "未知参数: $1" >&2
+        usage
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ -z "$cookie" ]]; then
+    echo "缺少 --cookie" >&2
+    exit 2
+  fi
+
+  ensure_state_dir
+  umask 077
+  printf '%s\n' "$cookie" > "$cookie_file"
+  chmod 600 "$cookie_file"
+  echo "Cookie 已保存: $cookie_file"
+}
+
+cmd_show_config() {
+  echo "base_url=$base_url"
+  echo "cookie_file=$cookie_file"
+  if [[ -f "$cookie_file" ]]; then
+    local len
+    len=$(wc -c < "$cookie_file" | tr -d ' ')
+    echo "cookie_saved=yes (${len} bytes)"
+  else
+    echo "cookie_saved=no"
+  fi
+}
+
+cmd_upload() {
+  local file=""
+  local color="1"
+  local paper="-1"
+  local duplex="1"
+  local from="0"
+  local to="0"
+  local copies="1"
+  local ts
+  ts=$(date +%s)
+  local back_url="${base_url%/}/client/new/cprintPc/printDoc.html?t=${ts}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --file) file="${2:-}"; shift 2 ;;
+      --base-url) base_url="${2:-}"; shift 2 ;;
+      --color) color="${2:-}"; shift 2 ;;
+      --paper) paper="${2:-}"; shift 2 ;;
+      --duplex) duplex="${2:-}"; shift 2 ;;
+      --from) from="${2:-}"; shift 2 ;;
+      --to) to="${2:-}"; shift 2 ;;
+      --copies) copies="${2:-}"; shift 2 ;;
+      --back-url) back_url="${2:-}"; shift 2 ;;
+      *)
+        echo "未知参数: $1" >&2
+        usage
+        exit 2
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]; then
+    echo "缺少 --file" >&2
+    exit 2
+  fi
+  if [[ ! -f "$file" ]]; then
+    echo "文件不存在: $file" >&2
+    exit 2
+  fi
+  if [[ ! -f "$cookie_file" ]]; then
+    echo "未找到 Cookie，请先执行 set-cookie" >&2
+    exit 2
+  fi
+
+  local cookie
+  cookie=$(cat "$cookie_file")
+  local endpoint="${base_url%/}/api/client/CloudPrint/Upload"
+
+  local tmp_body
+  local tmp_headers
+  tmp_body=$(mktemp /tmp/cprint_upload_body_XXXX.json)
+  tmp_headers=$(mktemp /tmp/cprint_upload_headers_XXXX.txt)
+  trap 'rm -f "$tmp_body" "$tmp_headers"' EXIT
+
+  local status
+  status=$(curl -sS -m 120 -o "$tmp_body" -D "$tmp_headers" -w '%{http_code}' \
+    -H "Cookie: $cookie" \
+    -F "szPath=@$file" \
+    -F "dwColor=$color" \
+    -F "dwPaperId=$paper" \
+    -F "dwDuplex=$duplex" \
+    -F "dwFrom=$from" \
+    -F "dwTo=$to" \
+    -F "dwCopies=$copies" \
+    -F "BackURL=$back_url" \
+    "$endpoint")
+
+  local code=""
+  local message=""
+  local location=""
+
+  if [[ "$status" == "302" ]]; then
+    location=$(sed -n 's/^Location:[[:space:]]*//p' "$tmp_headers" | tr -d '\r' | head -n1)
+    code=$(printf '%s' "$location" | sed -E 's/.*[?&]code=([-0-9]+).*/\1/' || true)
+    message=$(printf '%s' "$location" | sed -E 's/.*[?&]message=([^&]*).*/\1/' || true)
+    echo "redirect=$location"
+  elif [[ "$status" == "200" ]]; then
+    local one_line
+    one_line=$(tr -d '\n' < "$tmp_body")
+    code=$(printf '%s' "$one_line" | sed -E 's/.*"code"[[:space:]]*:[[:space:]]*(-?[0-9]+).*/\1/' || true)
+    message=$(printf '%s' "$one_line" | sed -E 's/.*"message"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true)
+    echo "response=$(cat "$tmp_body")"
+  else
+    echo "上传失败: HTTP $status"
+    sed -n '1,20p' "$tmp_body"
+    exit 1
+  fi
+
+  if [[ "$code" == "0" ]]; then
+    echo "上传成功"
+    exit 0
+  fi
+
+  echo "上传失败: code=${code:-unknown}, message=${message:-unknown}"
+  if [[ "$code" == "4" ]]; then
+    echo "提示: 登录态失效，请重新执行 set-cookie"
+  fi
+  exit 1
+}
+
+main() {
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 2
+  fi
+  local cmd="$1"
+  shift
+
+  case "$cmd" in
+    set-cookie) cmd_set_cookie "$@" ;;
+    upload) cmd_upload "$@" ;;
+    show-config) cmd_show_config "$@" ;;
+    -h|--help|help) usage ;;
+    *)
+      echo "未知子命令: $cmd" >&2
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
